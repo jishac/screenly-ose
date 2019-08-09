@@ -29,7 +29,7 @@ if [ "$INSTALL" != 'y' ]; then
   exit 1
 fi
 
-echo && read -p "Would you like to use the experimental branch? It contains the last major changes, such as the new browser and migrating to the docker (y/N)" -n 1 -r -s EXP && echo
+echo && read -p "Would you like to use the experimental branch? It contains the last major changes, such as the new browser and migrating to Docker (y/N)" -n 1 -r -s EXP && echo
 if [ "$EXP" != 'y'  ]; then
   echo && read -p "Would you like to use the development branch? You will get the latest features, but things may break. (y/N)" -n 1 -r -s DEV && echo
   if [ "$DEV" != 'y'  ]; then
@@ -44,17 +44,12 @@ else
   BRANCH="experimental"
 fi
 
-echo && read -p "Do you want Screenly to manage your network? This is recommended for most users. (Y/n)" -n 1 -r -s NETWORK && echo
-if [ "$NETWORK" == 'n' ]; then
-  export MANAGE_NETWORK=false
-else
-  dpkg -s network-manager > /dev/null 2>&1
-  if [ "$?" = "1" ]; then
-    echo -e "\n\nIt looks like NetworkManager is not installed. Please install it by running 'sudo apt install -y network-manager' and then re-run the installation."
-    exit 1
-  fi
-  
-  export MANAGE_NETWORK=true
+echo && read -p "Do you want Screenly to manage your network? This is recommended for most users because this adds features to manage your network. (Y/n)" -n 1 -r -s NETWORK && echo
+
+echo && read -p "Would you like to install the WoTT agent to help you manage security of your Raspberry Pi? (y/N)" -n 1 -r -s WOTT && echo
+if [ "$WOTT" = 'y' ]; then
+    curl -s https://packagecloud.io/install/repositories/wott/agent/script.deb.sh | sudo bash
+    sudo apt install wott-agent
 fi
 
 echo && read -p "Would you like to perform a full system upgrade as well? (y/N)" -n 1 -r -s UPGRADE && echo
@@ -89,7 +84,14 @@ sudo apt-get purge -y python-setuptools python-pip python-pyasn1
 sudo apt-get install -y python-dev git-core libffi-dev libssl-dev
 curl -s https://bootstrap.pypa.io/get-pip.py | sudo python
 
-sudo pip install ansible==2.5.3
+if [ "$NETWORK" == 'y' ]; then
+  export MANAGE_NETWORK=true
+  sudo apt-get install -y network-manager
+else
+  export MANAGE_NETWORK=false
+fi
+
+sudo pip install ansible==2.8.1
 
 ansible localhost -m git -a "repo=${1:-https://github.com/screenly/screenly-ose.git} dest=/home/pi/screenly version=$BRANCH"
 cd /home/pi/screenly/ansible
@@ -105,6 +107,8 @@ sudo find /usr/share/locale -type f ! -name 'en' ! -name 'de*' ! -name 'es*' ! -
 sudo find /usr/share/locale -mindepth 1 -maxdepth 1 ! -name 'en*' ! -name 'de*' ! -name 'es*' ! -name 'ja*' ! -name 'fr*' ! -name 'zh*' -exec rm -r {} \;
 
 cd ~/screenly && git rev-parse HEAD > ~/.screenly/latest_screenly_sha
+
+echo -e "Screenly version: $(git rev-parse --abbrev-ref HEAD)@$(git rev-parse --short HEAD)\n$(lsb_release -a)" > ~/version.md
 
 set +x
 echo "Installation completed."

@@ -1,33 +1,37 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import logging
+import pydbus
+import random
+import re
+import sh
+import string
+import zmq
 from datetime import datetime, timedelta
+from mixpanel import Mixpanel, MixpanelException
+from netifaces import gateways
 from os import path, getenv, utime, system
 from platform import machine
 from random import shuffle
 from threading import Thread
-
-from mixpanel import Mixpanel, MixpanelException
-from netifaces import gateways
 from requests import get as req_get
-from signal import signal, SIGUSR1
+from signal import alarm, signal, SIGALRM, SIGUSR1
 from time import sleep
-import logging
-import random
-import sh
-import string
-import zmq
 
-from settings import settings, LISTEN, PORT
 import html_templates
-from lib.github import fetch_remote_hash, remote_branch_available
-from lib.utils import url_fails, touch, is_ci
-from lib import db
+from settings import settings, LISTEN, PORT, ZmqConsumer
+
 from lib import assets_helper
+from lib import db
+from lib.diagnostics import get_git_branch, get_git_short_hash
+from lib.github import fetch_remote_hash, remote_branch_available
+from lib.errors import SigalrmException
+from lib.utils import get_active_connections, url_fails, touch, is_balena_app, is_ci, get_node_ip
 
 
 __author__ = "Screenly, Inc"
-__copyright__ = "Copyright 2012-2017, Screenly, Inc"
+__copyright__ = "Copyright 2012-2019, Screenly, Inc"
 __license__ = "Dual License: GPLv2 and Commercial License"
 
 
@@ -52,6 +56,13 @@ arch = None
 db_conn = None
 
 scheduler = None
+
+
+def sigalrm(signum, frame):
+    """
+    Signal just throw an SigalrmException
+    """
+    raise SigalrmException("SigalrmException")
 
 
 def sigusr1(signum, frame):
@@ -82,12 +93,18 @@ def command_not_found():
     logging.error("Command not found")
 
 
+def send_current_asset_id_to_server():
+    consumer = ZmqConsumer()
+    consumer.send({'current_asset_id': scheduler.current_asset_id})
+
+
 commands = {
     'next': lambda _: skip_asset(),
     'previous': lambda _: skip_asset(back=True),
     'asset': lambda id: navigate_to_asset(id),
     'reload': lambda _: load_settings(),
-    'unknown': lambda _: command_not_found()
+    'unknown': lambda _: command_not_found(),
+    'current_asset_id': lambda _: send_current_asset_id_to_server()
 }
 
 
@@ -116,11 +133,12 @@ class Scheduler(object):
     def __init__(self, *args, **kwargs):
         logging.debug('Scheduler init')
         self.assets = []
-        self.deadline = None
-        self.index = 0
         self.counter = 0
-        self.reverse = 0
+        self.current_asset_id = None
+        self.deadline = None
         self.extra_asset = None
+        self.index = 0
+        self.reverse = 0
         self.update_playlist()
 
     def get_next_asset(self):
@@ -129,6 +147,7 @@ class Scheduler(object):
         if self.extra_asset is not None:
             asset = get_specific_asset(self.extra_asset)
             if asset and asset['is_processing'] == 0:
+                self.current_asset_id = self.extra_asset
                 self.extra_asset = None
                 return asset
             logging.error("Asset not found or processed")
@@ -137,6 +156,7 @@ class Scheduler(object):
         self.refresh_playlist()
         logging.debug('get_next_asset after refresh')
         if not self.assets:
+            self.current_asset_id = None
             return None
         if self.reverse:
             idx = (self.index - 2) % len(self.assets)
@@ -148,7 +168,10 @@ class Scheduler(object):
         logging.debug('get_next_asset counter %s returning asset %s of %s', self.counter, idx + 1, len(self.assets))
         if settings['shuffle_playlist'] and self.index == 0:
             self.counter += 1
-        return self.assets[idx]
+
+        current_asset = self.assets[idx]
+        self.current_asset_id = current_asset.get('asset_id')
+        return current_asset
 
     def refresh_playlist(self):
         logging.debug('refresh_playlist')
@@ -175,13 +198,14 @@ class Scheduler(object):
         # Try to keep the same position in the play list. E.g. if a new asset is added to the end of the list, we
         # don't want to start over from the beginning.
         self.index = self.index % len(self.assets) if self.assets else 0
-        logging.debug('update_playlist done, count %s, counter %s, index %s, deadline %s', len(self.assets), self.counter, self.index, self.deadline)
+        logging.debug('update_playlist done, count %s, counter %s, index %s, deadline %s', len(self.assets),
+                      self.counter, self.index, self.deadline)
 
     def get_db_mtime(self):
         # get database file last modification time
         try:
             return path.getmtime(settings['database'])
-        except:
+        except (OSError, TypeError):
             return 0
 
 
@@ -239,14 +263,30 @@ def load_browser(url=None):
     browser_send(uzbl_rc)
 
 
+def browser_get_event():
+    alarm(10)
+    try:
+        event = browser.next()
+    except SigalrmException:
+        return None
+    alarm(0)
+    return event
+
+
 def browser_send(command, cb=lambda _: True):
     if not (browser is None) and browser.process.alive:
         while not browser.process._pipe_queue.empty():  # flush stdout
-            browser.next()
+            browser_get_event()
 
         browser.process.stdin.put(command + '\n')
         while True:  # loop until cb returns True
-            if cb(browser.next()):
+            try:
+                browser_event = browser_get_event()
+            except StopIteration:
+                break
+            if not browser_event:
+                break
+            if cb(browser_event):
                 break
     else:
         logging.info('browser found dead, restarting')
@@ -255,7 +295,8 @@ def browser_send(command, cb=lambda _: True):
 
 def browser_clear(force=False):
     """Load a black page. Default cb waits for the page to load."""
-    browser_url('file://' + BLACK_PAGE, force=force, cb=lambda buf: 'LOAD_FINISH' in buf and BLACK_PAGE in buf)
+    browser_url('file://' + BLACK_PAGE, force=force,
+                cb=lambda buf: 'LOAD_FINISH' in buf and BLACK_PAGE in buf)
 
 
 def browser_url(url, cb=lambda _: True, force=False):
@@ -276,7 +317,8 @@ def browser_url(url, cb=lambda _: True, force=False):
 
 def view_image(uri):
     browser_clear()
-    browser_send('js window.setimg("{0}")'.format(uri), cb=lambda b: 'COMMAND_EXECUTED' in b and 'setimg' in b)
+    browser_send('js window.setimg("{0}")'.format(uri),
+                 cb=lambda b: 'COMMAND_EXECUTED' in b and 'setimg' in b)
 
 
 def view_video(uri, duration):
@@ -332,8 +374,8 @@ def check_update():
 
     logging.debug('Last update: %s' % str(last_update))
 
-    git_branch = sh.git('rev-parse', '--abbrev-ref', 'HEAD').strip()
-    git_hash = sh.git('rev-parse', '--short', 'HEAD').strip()
+    git_branch = get_git_branch()
+    git_hash = get_git_short_hash()
 
     if last_update is None or last_update < (datetime.now() - timedelta(days=1)):
 
@@ -343,6 +385,8 @@ def check_update():
                 mp.track(device_id, 'Version', {
                     'Branch': str(git_branch),
                     'Hash': str(git_hash),
+                    'NOOBS': path.isfile('/boot/os_config.json'),
+                    'Balena': is_balena_app()
                 })
             except MixpanelException:
                 pass
@@ -384,7 +428,7 @@ def asset_loop(scheduler):
         view_image(HOME + LOAD_SCREEN)
         sleep(EMPTY_PL_DELAY)
 
-    elif path.isfile(asset['uri']) or not url_fails(asset['uri']):
+    elif path.isfile(asset['uri']) or (not url_fails(asset['uri']) or asset['skip_asset_check']):
         name, mime, uri = asset['name'], asset['mimetype'], asset['uri']
         logging.info('Showing asset %s (%s)', name, mime)
         logging.debug('Asset URI %s', uri)
@@ -405,6 +449,7 @@ def asset_loop(scheduler):
             duration = int(asset['duration'])
             logging.info('Sleeping for %s', duration)
             sleep(duration)
+
     else:
         logging.info('Asset %s at %s is not available, skipping.', asset['name'], asset['uri'])
         sleep(0.5)
@@ -416,6 +461,7 @@ def setup():
     arch = machine()
 
     signal(SIGUSR1, sigusr1)
+    signal(SIGALRM, sigalrm)
 
     load_settings()
     db_conn = db.conn(settings['database'])
@@ -424,17 +470,69 @@ def setup():
     html_templates.black_page(BLACK_PAGE)
 
 
+def setup_hotspot():
+    bus = pydbus.SystemBus()
+
+    pattern_include = re.compile("wlan*")
+    pattern_exclude = re.compile("ScreenlyOSE-*")
+
+    wireless_connections = get_active_connections(bus)
+
+    if wireless_connections is None:
+        return
+
+    wireless_connections = filter(
+        lambda c: not pattern_exclude.search(str(c['Id'])),
+        filter(
+            lambda c: pattern_include.search(str(c['Devices'])),
+            wireless_connections
+        )
+    )
+
+    # Displays the hotspot page
+    if not path.isfile(HOME + INITIALIZED_FILE) and not gateways().get('default'):
+        if len(wireless_connections) == 0:
+            url = 'http://{0}/hotspot'.format(LISTEN)
+            load_browser(url=url)
+
+    # Wait until the network is configured
+    while not path.isfile(HOME + INITIALIZED_FILE) and not gateways().get('default'):
+        if len(wireless_connections) == 0:
+            sleep(1)
+            wireless_connections = filter(
+                lambda c: not pattern_exclude.search(str(c['Id'])),
+                filter(
+                    lambda c: pattern_include.search(str(c['Devices'])),
+                    get_active_connections(bus)
+                )
+            )
+            continue
+        if wireless_connections is None:
+            sleep(1)
+            continue
+        break
+
+    wait_for_node_ip(5)
+
+
+def wait_for_node_ip(seconds):
+    for _ in range(seconds):
+        try:
+            get_node_ip()
+            break
+        except Exception:
+            sleep(1)
+
+
 def main():
     setup()
 
-    if not path.isfile(HOME + INITIALIZED_FILE) and not gateways().get('default'):
-        url = 'http://{0}/hotspot'.format(LISTEN)
-        load_browser(url=url)
+    if is_balena_app():
+        load_browser()
+    else:
+        setup_hotspot()
 
-        while not path.isfile(HOME + INITIALIZED_FILE):
-            sleep(1)
-
-    url = 'http://{0}:{1}/splash_page'.format(LISTEN, PORT) if settings['show_splash'] else 'file://' + BLACK_PAGE
+    url = 'http://{0}:{1}/splash-page'.format(LISTEN, PORT) if settings['show_splash'] else 'file://' + BLACK_PAGE
     browser_url(url=url)
 
     if settings['show_splash']:
@@ -447,7 +545,7 @@ def main():
     subscriber.daemon = True
     subscriber.start()
 
-    # We don't want to show splash_page if there are active assets but all of them are not available
+    # We don't want to show splash-page if there are active assets but all of them are not available
     view_image(HOME + LOAD_SCREEN)
 
     logging.debug('Entering infinite loop.')
@@ -458,6 +556,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except:
+    except Exception:
         logging.exception("Viewer crashed.")
         raise

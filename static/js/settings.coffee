@@ -10,7 +10,12 @@ $().ready ->
     $('#btn-upload').prop 'disabled', yes
     $('#btn-backup').prop 'disabled', yes
 
-    $.post "api/v1/backup"
+    $.ajax({
+      method: "POST"
+      url: "api/v1/backup"
+      timeout: 1800 * 1000
+    })
+
     .done  (data, e) ->
       if (data)
         window.location = "static_with_mime/" + data + "?mime=application/x-tgz"
@@ -72,17 +77,16 @@ $().ready ->
       $('#request-error .alert').addClass 'alert-success'
       $('#request-error .alert').removeClass 'alert-danger'
       ($ '#request-error .msg').text 'Reset was successful. Please reboot the device.'
+    .error (e) ->
+        document.location.reload()
 
-  $('#auth_checkbox p span').click (e) ->
-    if $('input:checkbox[name="use_auth"]').is(':checked')
-      $('#user_group, #password_group, #password2_group').hide()
-      $('input:text[name="user"]').val('')
-      $('input:password[name="password"]').val('')
-      $('input:password[name="password2"]').val('')
-    else
-      $('#user_group, #password_group, #password2_group, #curpassword_group').show()
+  toggle_chunk = () ->
+    $("[id^=auth_chunk]").hide()
+    $.each $('#auth_backend option'), (e, t) ->
+      console.log t.value
+      $('#auth_backend-'+t.value).toggle $('#auth_backend').val() == t.value
 
-  if $('input:checkbox[name="use_auth"]').is(':checked')
-    $('#user_group, #password_group, #password2_group, #curpassword_group').show()
-  else
-    $('#user_group, #password_group, #password2_group, #curpassword_group').hide()
+  $('#auth_backend').change (e) ->
+    toggle_chunk()
+
+  toggle_chunk()

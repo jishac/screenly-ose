@@ -3,7 +3,7 @@
 /* screenly-ose ui */
 
 (function() {
-  var API, AddAssetView, App, Asset, AssetRowView, Assets, AssetsView, EditAssetView, date_settings, date_settings_12hour, date_settings_24hour, date_to, delay, domains, get_filename, get_mimetype, get_template, insertWbr, mimetypes, now, url_test, viduris,
+  var API, AddAssetView, App, Asset, AssetRowView, Assets, AssetsView, EditAssetView, dateSettings, date_to, delay, domains, duration_seconds_to_human_readable, get_filename, get_mimetype, get_template, insertWbr, mimetypes, now, truncate_str, url_test, viduris,
     indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; },
     bind = function(fn, me){ return function(){ return fn.apply(me, arguments); }; },
     extend = function(child, parent) { for (var key in parent) { if (hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; },
@@ -18,36 +18,36 @@
 
   API = (window.Screenly || (window.Screenly = {}));
 
-  date_settings_12hour = {
-    full_date: 'MM/DD/YYYY hh:mm:ss A',
-    date: 'MM/DD/YYYY',
-    time: 'hh:mm A',
-    show_meridian: true,
-    date_picker_format: 'mm/dd/yyyy'
-  };
+  dateSettings = {};
 
-  date_settings_24hour = {
-    full_date: 'MM/DD/YYYY HH:mm:ss',
-    date: 'MM/DD/YYYY',
-    time: 'HH:mm',
-    show_meridian: false,
-    datepicker_format: 'mm/dd/yyyy'
-  };
+  if (use24HourClock) {
+    dateSettings.time = "HH:mm";
+    dateSettings.fullTime = "HH:mm:ss";
+    dateSettings.showMeridian = false;
+  } else {
+    dateSettings.time = "hh:mm A";
+    dateSettings.fullTime = "hh:mm:ss A";
+    dateSettings.showMeridian = true;
+  }
 
-  date_settings = use_24_hour_clock ? date_settings_24hour : date_settings_12hour;
+  dateSettings.date = dateFormat.toUpperCase();
+
+  dateSettings.datepickerFormat = dateFormat;
+
+  dateSettings.fullDate = dateSettings.date + " " + dateSettings.fullTime;
 
   API.date_to = date_to = function(d) {
     var dd;
     dd = moment.utc(d).local();
     return {
       string: function() {
-        return dd.format(date_settings.full_date);
+        return dd.format(dateSettings.fullDate);
       },
       date: function() {
-        return dd.format(date_settings.date);
+        return dd.format(dateSettings.date);
       },
       time: function() {
-        return dd.format(date_settings.time);
+        return dd.format(dateSettings.time);
       }
     };
   };
@@ -97,12 +97,34 @@
     };
   })(this);
 
+  duration_seconds_to_human_readable = (function(_this) {
+    return function(secs) {
+      var duration_string, hours, minutes, sec_int, seconds;
+      duration_string = '';
+      sec_int = parseInt(secs);
+      if ((hours = Math.floor(sec_int / 3600)) > 0) {
+        duration_string += hours + ' hours ';
+      }
+      if ((minutes = Math.floor(sec_int / 60) % 60) > 0) {
+        duration_string += minutes + ' min ';
+      }
+      if ((seconds = sec_int % 60) > 0) {
+        duration_string += seconds + ' sec';
+      }
+      return duration_string;
+    };
+  })(this);
+
   url_test = function(v) {
     return /(http|https|rtsp|rtmp):\/\/[\w-]+(\.?[\w-]+)+([\w.,@?^=%&amp;:\/~+#-]*[\w@?^=%&amp;\/~+#-])?/.test(v);
   };
 
   get_filename = function(v) {
     return (v.replace(/[\/\\\s]+$/g, '')).replace(/^.*[\\\/]/g, '');
+  };
+
+  truncate_str = function(v) {
+    return v.replace(/(.{100})..+/, "$1...");
   };
 
   insertWbr = function(v) {
@@ -125,7 +147,7 @@
 
     Asset.prototype.idAttribute = "asset_id";
 
-    Asset.prototype.fields = 'name mimetype uri start_date end_date duration'.split(' ');
+    Asset.prototype.fields = 'name mimetype uri start_date end_date duration skip_asset_check'.split(' ');
 
     Asset.prototype.defaults = function() {
       return {
@@ -135,11 +157,12 @@
         is_active: 1,
         start_date: '',
         end_date: '',
-        duration: default_duration,
+        duration: defaultDuration,
         is_enabled: 0,
         is_processing: 0,
         nocache: 0,
-        play_order: 0
+        play_order: 0,
+        skip_asset_check: 0
       };
     };
 
@@ -209,6 +232,7 @@
       this.clickTabNavUri = bind(this.clickTabNavUri, this);
       this.clickTabNavUpload = bind(this.clickTabNavUpload, this);
       this.change_mimetype = bind(this.change_mimetype, this);
+      this.toggleSkipAssetCheck = bind(this.toggleSkipAssetCheck, this);
       this.save = bind(this.save, this);
       this.viewmodel = bind(this.viewmodel, this);
       this.initialize = bind(this.initialize, this);
@@ -234,7 +258,7 @@
       (this.$('.cancel')).val('Back to Assets');
       deadlines = {
         start: now(),
-        end: (moment().add('days', 7)).toDate()
+        end: (moment().add('days', 30)).toDate()
       };
       for (tag in deadlines) {
         if (!hasProp.call(deadlines, tag)) continue;
@@ -251,7 +275,7 @@
       ref = ['start', 'end'];
       for (k = 0, len = ref.length; k < len; k++) {
         which = ref[k];
-        this.$fv(which + "_date", (new Date((this.$fv(which + "_date_date")) + " " + (this.$fv(which + "_date_time")))).toISOString());
+        this.$fv(which + "_date", (moment((this.$fv(which + "_date_date")) + " " + (this.$fv(which + "_date_time")), dateSettings.fullDate)).toDate().toISOString());
       }
       ref1 = model.fields;
       results = [];
@@ -272,7 +296,8 @@
       'click .cancel': 'cancel',
       'hidden.bs.modal': 'destroyFileUploadWidget',
       'click .tabnav-uri': 'clickTabNavUri',
-      'click .tabnav-file_upload': 'clickTabNavUpload'
+      'click .tabnav-file_upload': 'clickTabNavUpload',
+      'change .is_enabled-skip_asset_check_checkbox': 'toggleSkipAssetCheck'
     };
 
     AddAssetView.prototype.save = function(e) {
@@ -304,7 +329,7 @@
         })(this));
         save.fail((function(_this) {
           return function() {
-            (_this.$('input')).prop('disable', false);
+            (_this.$('input')).prop('disabled', false);
             return model.destroy();
           };
         })(this));
@@ -312,13 +337,17 @@
       return false;
     };
 
+    AddAssetView.prototype.toggleSkipAssetCheck = function(e) {
+      return this.$fv('skip_asset_check', parseInt(this.$fv('skip_asset_check')) === 1 ? 0 : 1);
+    };
+
     AddAssetView.prototype.change_mimetype = function() {
       if ((this.$fv('mimetype')) === "video") {
         return this.$fv('duration', 0);
       } else if ((this.$fv('mimetype')) === "streaming") {
-        return this.$fv('duration', default_streaming_duration);
+        return this.$fv('duration', defaultStreamingDuration);
       } else {
-        return this.$fv('duration', default_duration);
+        return this.$fv('duration', defaultDuration);
       }
     };
 
@@ -330,6 +359,7 @@
         (this.$('.tabnav-file_upload')).addClass('active show');
         (this.$('#tab-file_upload')).addClass('active');
         (this.$('.uri')).hide();
+        (this.$('.skip_asset_check_checkbox')).hide();
         (this.$('#save-asset')).hide();
         that = this;
         (this.$("[name='file_upload']")).fileupload({
@@ -381,9 +411,14 @@
           },
           stop: function(e) {
             (that.$('.progress')).hide();
-            (that.$('.progress .bar')).css('width', "0");
+            return (that.$('.progress .bar')).css('width', "0");
+          },
+          done: function(e, data) {
             (that.$('.status')).show();
-            return (that.$('.status')).html('Upload completed.');
+            (that.$('.status')).html('Upload completed.');
+            return setTimeout(function() {
+              return (that.$('.status')).fadeOut('slow');
+            }, 5000);
           }
         });
       }
@@ -399,6 +434,8 @@
         (this.$('#tab-uri')).addClass('active');
         (this.$('#save-asset')).show();
         (this.$('.uri')).show();
+        (this.$('.skip_asset_check_checkbox')).show();
+        (this.$('.status')).hide();
         return (this.$f('uri')).focus();
       }
     };
@@ -414,9 +451,7 @@
     AddAssetView.prototype.updateMimetype = function(filename) {
       var mt;
       mt = get_mimetype(filename);
-      if (mt) {
-        this.$fv('mimetype', mt);
-      }
+      this.$fv('mimetype', mt ? mt : new Asset().defaults()['mimetype']);
       return this.change_mimetype();
     };
 
@@ -436,8 +471,10 @@
       validators = {
         uri: (function(_this) {
           return function(v) {
-            if (((that.$('#tab-uri')).hasClass('active')) && !url_test(v)) {
-              return 'please enter a valid URL';
+            if (v) {
+              if (((that.$('#tab-uri')).hasClass('active')) && !url_test(v)) {
+                return 'please enter a valid URL';
+              }
             }
           };
         })(this)
@@ -484,12 +521,15 @@
     extend(EditAssetView, superClass);
 
     function EditAssetView() {
+      this.setDisabledDatepicker = bind(this.setDisabledDatepicker, this);
+      this.setLoopDateTime = bind(this.setLoopDateTime, this);
       this.displayAdvanced = bind(this.displayAdvanced, this);
       this.toggleAdvanced = bind(this.toggleAdvanced, this);
       this.cancel = bind(this.cancel, this);
       this.validate = bind(this.validate, this);
       this.change = bind(this.change, this);
       this.save = bind(this.save, this);
+      this.changeLoopTimes = bind(this.changeLoopTimes, this);
       this.viewmodel = bind(this.viewmodel, this);
       this.render = bind(this.render, this);
       this.initialize = bind(this.initialize, this);
@@ -514,7 +554,7 @@
         minuteStep: 5,
         showInputs: true,
         disableFocus: true,
-        showMeridian: date_settings.show_meridian
+        showMeridian: dateSettings.showMeridian
       });
       (this.$('input[name="nocache"]')).prop('checked', this.model.get('nocache'));
       (this.$('.modal-header .close')).remove();
@@ -537,6 +577,7 @@
       (this.$('#modalLabel')).text("Edit Asset");
       (this.$('.asset-location')).hide();
       (this.$('.uri')).hide();
+      (this.$('.skip_asset_check_checkbox')).hide();
       (this.$('.asset-location.edit')).show();
       (this.$('.mime-select')).prop('disabled', 'true');
       if ((this.model.get('mimetype')) === 'video') {
@@ -549,7 +590,7 @@
           this.$fv(field, this.model.get(field));
         }
       }
-      (this.$('.uri-text')).html(insertWbr(this.model.get('uri')));
+      (this.$('.uri-text')).html(insertWbr(truncate_str(this.model.get('uri'))));
       ref2 = ['start', 'end'];
       for (m = 0, len2 = ref2.length; m < len2; m++) {
         which = ref2[m];
@@ -557,7 +598,7 @@
         this.$fv(which + "_date_date", d.date());
         (this.$f(which + "_date_date")).datepicker({
           autoclose: true,
-          format: date_settings.datepicker_format
+          format: dateSettings.datepickerFormat
         });
         (this.$f(which + "_date_date")).datepicker('setValue', d.date());
         this.$fv(which + "_date_time", d.time());
@@ -572,7 +613,7 @@
       ref = ['start', 'end'];
       for (k = 0, len = ref.length; k < len; k++) {
         which = ref[k];
-        this.$fv(which + "_date", (new Date((this.$fv(which + "_date_date")) + " " + (this.$fv(which + "_date_time")))).toISOString());
+        this.$fv(which + "_date", (moment((this.$fv(which + "_date_date")) + " " + (this.$fv(which + "_date_time")), dateSettings.fullDate)).toDate().toISOString());
       }
       ref1 = this.model.fields;
       results = [];
@@ -593,6 +634,37 @@
       'change': 'change',
       'keyup': 'change',
       'click .advanced-toggle': 'toggleAdvanced'
+    };
+
+    EditAssetView.prototype.changeLoopTimes = function() {
+      var current_date, end_date;
+      current_date = new Date();
+      end_date = new Date();
+      switch (this.$('#loop_times').val()) {
+        case "day":
+          this.setLoopDateTime(date_to(current_date), date_to(end_date.setDate(current_date.getDate() + 1)));
+          break;
+        case "week":
+          this.setLoopDateTime(date_to(current_date), date_to(end_date.setDate(current_date.getDate() + 7)));
+          break;
+        case "month":
+          this.setLoopDateTime(date_to(current_date), date_to(end_date.setMonth(current_date.getMonth() + 1)));
+          break;
+        case "year":
+          this.setLoopDateTime(date_to(current_date), date_to(end_date.setFullYear(current_date.getFullYear() + 1)));
+          break;
+        case "forever":
+          this.setLoopDateTime(date_to(current_date), date_to(end_date.setFullYear(9999)));
+          break;
+        case "manual":
+          this.setDisabledDatepicker(false);
+          (this.$("#manul_date")).show();
+          return;
+        default:
+          return;
+      }
+      this.setDisabledDatepicker(true);
+      return (this.$("#manul_date")).hide();
     };
 
     EditAssetView.prototype.save = function(e) {
@@ -645,9 +717,10 @@
     EditAssetView.prototype.change = function(e) {
       this._change || (this._change = _.throttle(((function(_this) {
         return function() {
+          _this.changeLoopTimes();
           _this.viewmodel();
           _this.model.trigger('change');
-          _this.validate();
+          _this.validate(e);
           return true;
         };
       })(this)), 500));
@@ -661,14 +734,21 @@
         duration: (function(_this) {
           return function(v) {
             if (('video' !== _this.model.get('mimetype')) && (!(_.isNumber(v * 1)) || v * 1 < 1)) {
-              return 'please enter a valid number';
+              return 'Please enter a valid number.';
             }
           };
         })(this),
         end_date: (function(_this) {
           return function(v) {
+            var end_date, ref, start_date;
             if (!((new Date(_this.$fv('start_date'))) < (new Date(_this.$fv('end_date'))))) {
-              return 'end date should be after start date';
+              if (((ref = $(e != null ? e.target : void 0)) != null ? ref.attr("name") : void 0) === "start_date_date") {
+                start_date = new Date(_this.$fv('start_date'));
+                end_date = new Date(start_date.getTime() + Math.max(parseInt(_this.$fv('duration')), 60) * 1000);
+                _this.setLoopDateTime(date_to(start_date), date_to(end_date));
+                return;
+              }
+              return 'End date should be after start date.';
             }
           };
         })(this)
@@ -716,6 +796,38 @@
       return (this.$('.advanced-accordion')).toggle(has_nocache === true);
     };
 
+    EditAssetView.prototype.setLoopDateTime = function(start_date, end_date) {
+      this.$fv("start_date_date", start_date.date());
+      (this.$f("start_date_date")).datepicker({
+        autoclose: true,
+        format: dateSettings.datepickerFormat
+      });
+      (this.$f("start_date_date")).datepicker('setDate', moment(start_date.date(), dateSettings.date).toDate());
+      this.$fv("start_date_time", start_date.time());
+      this.$fv("end_date_date", end_date.date());
+      (this.$f("end_date_date")).datepicker({
+        autoclose: true,
+        format: dateSettings.datepickerFormat
+      });
+      (this.$f("end_date_date")).datepicker('setDate', moment(end_date.date(), dateSettings.date).toDate());
+      this.$fv("end_date_time", end_date.time());
+      (this.$(".form-group .help-inline.invalid-feedback")).remove();
+      (this.$(".form-group .form-control")).removeClass('is-invalid');
+      return (this.$('[type=submit]')).prop('disabled', false);
+    };
+
+    EditAssetView.prototype.setDisabledDatepicker = function(b) {
+      var k, len, ref, results, which;
+      ref = ['start', 'end'];
+      results = [];
+      for (k = 0, len = ref.length; k < len; k++) {
+        which = ref[k];
+        (this.$f(which + "_date_date")).attr('disabled', b);
+        results.push((this.$f(which + "_date_time")).attr('disabled', b));
+      }
+      return results;
+    };
+
     return EditAssetView;
 
   })(Backbone.View);
@@ -745,7 +857,8 @@
     AssetRowView.prototype.render = function() {
       var json;
       this.$el.html(this.template(_.extend(json = this.model.toJSON(), {
-        name: insertWbr(json.name),
+        name: insertWbr(truncate_str(json.name)),
+        duration: duration_seconds_to_human_readable(json.duration),
         start_date: (date_to(json.start_date)).string(),
         end_date: (date_to(json.end_date)).string()
       })));
@@ -976,23 +1089,32 @@
           var err, j;
           ($('#request-error')).html((get_template('request-error'))());
           if ((j = $.parseJSON(r.responseText)) && (err = j.error)) {
-            return ($('#request-error .msg')).text('Server Error: ' + err);
+            ($('#request-error .msg')).text('Server Error: ' + err);
           }
+          ($('#request-error')).show();
+          return setTimeout(function() {
+            return ($('#request-error')).fadeOut('slow');
+          }, 5000);
         };
       })(this));
-      ($(window)).ajaxSuccess((function(_this) {
-        return function(data) {
-          return ($('#request-error')).html('');
-        };
-      })(this));
+      ($(window)).ajaxSuccess(function(event, request, settings) {
+        if ((settings.url === new Assets().url) && (settings.type === 'POST')) {
+          ($('#request-error')).html((get_template('request-success'))());
+          ($('#request-error .msg')).text('Asset has been successfully uploaded.');
+          ($('#request-error')).show();
+          return setTimeout(function() {
+            return ($('#request-error')).fadeOut('slow');
+          }, 5000);
+        }
+      });
       (API.assets = new Assets()).fetch();
       API.assetsView = new AssetsView({
         collection: API.assets,
         el: this.$('#assets')
       });
       results = [];
-      for (k = 0, len = ws_addresses.length; k < len; k++) {
-        address = ws_addresses[k];
+      for (k = 0, len = wsAddresses.length; k < len; k++) {
+        address = wsAddresses[k];
         try {
           ws = new WebSocket(address);
           results.push(ws.onmessage = function(x) {
@@ -1034,3 +1156,5 @@
   })(Backbone.View);
 
 }).call(this);
+
+//# sourceMappingURL=screenly-ose.js.map
